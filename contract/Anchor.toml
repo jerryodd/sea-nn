@@ -1,0 +1,15 @@
+[features]
+seeds = false
+skip-lint = false
+[programs.localnet]
+sea_nn = "FWLq3NyoFVUWznniq1i5vU8Dp1DK3P6JxrXnJp2mq1DX"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "/Users/wireless_anon/.config/solana/id.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

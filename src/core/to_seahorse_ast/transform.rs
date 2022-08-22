@@ -1,4 +1,4 @@
-use crate::core::{python_ast::Location, seahorse_ast::*, CoreError};
+use crate::core::{python_ast::Location, seahorse_ast::*, to_rust_source::data_name, CoreError};
 use heck::ToUpperCamelCase;
 use std::{
     collections::{HashMap, HashSet},
@@ -202,8 +202,8 @@ impl TransformPass {
         // Builtins
         match name.as_str() {
             "abs" | "pow" | "repr" | "sorted" | "str" | "sum" | "type" | "len" | "range"
-            | "print" | "u8" | "u64" | "i64" | "f64" | "round" | "ceil" | "floor" | "min"
-            | "max" => {
+            | "print" | "u8" | "u64" | "i64" | "f64" | "u32" | "i32" | "round" | "ceil"
+            | "floor" | "min" | "max" => {
                 return true;
             }
             _ => {}
@@ -333,6 +333,7 @@ impl TransformPass {
             Expression::SolTransfer { .. } => Ty::Unit,
             Expression::CpiCall { .. } => Ty::Unit,
             Expression::GetBump { .. } => Ty::U8,
+            Expression::GetData { .. } => Ty::Array(Box::new(Ty::U8), TyParam::Any),
             Expression::FString { .. } => Ty::String,
             Expression::List(value) => {
                 if value.len() == 0 {
@@ -410,6 +411,7 @@ impl TransformPass {
                             name: name.clone(),
                             is_mut: true,
                             is_acc: true,
+                            is_zero_copy: traits.contains(&TraitName::ZeroCopy),
                         },
                     );
                 }
@@ -423,6 +425,7 @@ impl TransformPass {
                             name: name.clone(),
                             is_mut: false,
                             is_acc: false,
+                            is_zero_copy: false,
                         },
                     );
                 }
@@ -594,8 +597,11 @@ impl TransformPass {
                         account_type: param.ty.clone(),
                         init: None,
                     });
-
                     context_defs.push(Statement::DeclareFromContext {
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                    });
+                    context_defs.push(Statement::DeclareAccountData {
                         name: param.name.clone(),
                         ty: param.ty.clone(),
                     });
@@ -792,6 +798,11 @@ impl TransformPass {
                             right,
                         })
                     }
+                } else if let Expression::Index { .. } = left {
+                    Ok(Statement::Assign {
+                        left: self.transform_expression(left)?,
+                        right,
+                    })
                 } else {
                     Ok(Statement::Assign { left, right })
                 }
@@ -884,8 +895,9 @@ impl TransformPass {
 
                 Ok(Statement::ForIn { target, iter, body })
             }
-            // Ignore DeclareFromContext statements - they're just there for the source code
-            statement @ Statement::DeclareFromContext { .. } => Ok(statement),
+            // Ignore Declare... statements - they're just there for the source code
+            statement @ Statement::DeclareFromContext { .. }
+            | statement @ Statement::DeclareAccountData { .. } => Ok(statement),
             // Everything else
             statement => {
                 self.context.allow_inits = false;
@@ -929,15 +941,30 @@ impl TransformPass {
                 })
             }
             Expression::Attribute { value, attr } => {
-                let value = self.transform_expression(*value)?;
+                let name = value.as_id();
+                let transformed = self.transform_expression(*value)?;
 
-                Ok(match self.infer_type(&value) {
-                    Ty::DefinedName(_) => Expression::StaticAttribute {
-                        value: Box::new(value),
+                Ok(match (self.infer_type(&transformed), name) {
+                    (Ty::DefinedName(_), _) => Expression::StaticAttribute {
+                        value: Box::new(transformed),
                         attr,
                     },
+                    (
+                        Ty::ExactDefined {
+                            is_acc: true,
+                            is_zero_copy: true,
+                            ..
+                        },
+                        Some(name),
+                    ) if attr != "key".to_string() => Expression::Attribute {
+                        value: Box::new(Expression::Id(data_name(&name))),
+                        attr,
+                    },
+                    (Ty::UncheckedAccount, Some(name)) if attr == "data".to_string() => {
+                        Expression::GetData { name }
+                    }
                     _ => Expression::Attribute {
-                        value: Box::new(value),
+                        value: Box::new(transformed),
                         attr,
                     },
                 })
@@ -1306,7 +1333,7 @@ impl TransformPass {
                     })
                 }
                 // Constructors for numeric types
-                "u8" | "u64" | "i64" | "f64" => {
+                "u8" | "u64" | "i64" | "f64" | "u32" | "i32" => {
                     // u8(...), u64(...), etc.
                     let mut args =
                         self.transform_call_args(args, &vec![Param::new("0", Ty::num())])?;
@@ -1316,6 +1343,8 @@ impl TransformPass {
                     let as_ty = match name.as_str() {
                         "u8" => Ty::U8,
                         "u64" => Ty::U64,
+                        "u32" => Ty::U32,
+                        "i32" => Ty::I32,
                         "i64" => Ty::I64,
                         "f64" => Ty::F64,
                         _ => panic!(),
@@ -1363,7 +1392,7 @@ impl TransformPass {
                     for arg in args.iter() {
                         as_ty = Operator::Lt
                             .coercion(&as_ty, &self.infer_type(arg))
-                            .unwrap()
+                            .unwrap_or((as_ty, Ty::Any))
                             .0;
                     }
 
@@ -1719,12 +1748,14 @@ impl TransformPass {
                                 let payer = arg("payer").as_id().unwrap();
                                 let seeds =
                                     self.transform_seeds(arg("seeds").as_list().unwrap())?;
+                                let is_zero_copy = self.ty_defs.get(&acc).unwrap().is_zero_copy();
 
                                 AccountInit::Program {
                                     account_type: Ty::ExactDefined {
                                         name: acc,
                                         is_mut: true,
                                         is_acc: true,
+                                        is_zero_copy,
                                     },
                                     payer,
                                     seeds,
@@ -1784,6 +1815,16 @@ impl TransformPass {
                             Err(Error::CallWithoutFunctionType(format!("{}.{}", name, attr)))
                         }
                     }
+                    (Ty::Pubkey, "to_bytes") => {
+                        let args = self.transform_call_args(args, &vec![])?;
+                        Ok(Expression::Call {
+                            func: Box::new(Expression::Attribute {
+                                value,
+                                attr: "to_bytes".to_string(),
+                            }),
+                            args: vec![],
+                        })
+                    }
                     (ty, attr) => {
                         if let Some((params, ..)) =
                             ty.get_attr(attr).and_then(|ty| ty.as_function())
@@ -1824,6 +1865,7 @@ impl TransformPass {
     ) -> Result<Vec<Expression>, CoreError> {
         let mut seeds = Vec::new();
         for seed in raw_seeds.into_iter() {
+            println!("{:?}", seed);
             seeds.push(match self.infer_type(&seed) {
                 Ty::String => seed
                     .with_call("as_bytes", vec![])

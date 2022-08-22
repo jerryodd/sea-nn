@@ -2,7 +2,7 @@ use crate::core::{seahorse_ast::*, CoreError};
 
 use heck::ToSnakeCase;
 use proc_macro2::{Ident, Literal, TokenStream};
-use quote::{format_ident, quote, ToTokens};
+use quote::{format_ident, quote, ToTokens, TokenStreamExt};
 use regex::Regex;
 #[cfg(not(target_arch = "wasm32"))]
 use rustfmt_wrapper::{config::*, rustfmt_config, Error as RustfmtError};
@@ -12,39 +12,48 @@ fn ident<S: ToString>(name: &S) -> Ident {
     format_ident!("{}", name.to_string())
 }
 
+pub fn data_name<S: ToString>(name: &S) -> String {
+    format!("__{}_data", name.to_string())
+}
+
 fn account_token_stream(def: &TyDef) -> TokenStream {
+    let mut tokens = TokenStream::new();
+
+    // This is technically a rust compiler version limitation, rather than wasm
+    // When compiling to wasm for Playground, we need to work around #![feature(macro_attributes_in_derive_output)]
+    // which is not supported by that version of Rust
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        return quote! {
-            #[derive(Debug)]
-            #[account]
-            #def
-        };
+    tokens.extend(quote! { #[derive(Debug)] });
+
+    if def.is_zero_copy() {
+        tokens.extend(quote! { #[account(zero_copy)] });
+    } else {
+        tokens.extend(quote! { #[account] });
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // This is technically a rust compiler version limitation, rather than wasm
-        // When compiling to wasm for Playground, we need to work around #![feature(macro_attributes_in_derive_output)]
-        // which is not supported by that version of Rust
-        return quote! {
-            #[account]
-            #def
-        };
-    }
+
+    tokens.extend(quote! { #def });
+    tokens
 }
 
 impl ToTokens for Def {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         tokens.extend(match self {
-            Def::TyDef(def) if def.is_account() => account_token_stream(def),
             Def::TyDef(def) if def.is_enum() => quote! {
                 #[derive(AnchorSerialize, AnchorDeserialize, Debug, Clone, PartialEq)]
                 #def
             },
-            Def::TyDef(def) => quote! {
-                #[derive(AnchorSerialize, AnchorDeserialize, Default, Debug, Clone, PartialEq)]
-                #def
-            },
+            Def::TyDef(def) if def.is_account() => account_token_stream(def),
+            Def::TyDef(def) => {
+                let mut tokens = TokenStream::new();
+                if def.is_zero_copy() {
+                    tokens.extend(quote! { #[zero_copy] });
+                }
+                tokens.extend(quote! {
+                    #[derive(AnchorSerialize, AnchorDeserialize, Default, Debug, Clone, PartialEq)]
+                    #def
+                });
+                tokens
+            }
             Def::FunctionDef(def) => quote! {
                 #def
             },
@@ -138,11 +147,15 @@ impl<'t> ToTokens for InAccounts<'t> {
 
                 quote! { #ty }
             }
-            Ty::ExactDefined { name, .. } => {
+            Ty::ExactDefined {
+                name, is_zero_copy, ..
+            } => {
                 let name = ident(&name);
 
-                quote! {
-                    Box<Account<'info, #name>>
+                if *is_zero_copy {
+                    quote! { AccountLoader<'info, #name> }
+                } else {
+                    quote! { Box<Account<'info, #name>> }
                 }
             }
             _ => panic!("Encountered an unformattable account type {:?}", self.0),
@@ -275,6 +288,8 @@ impl ToTokens for Ty {
             Ty::U64 => quote! { u64 },
             Ty::I64 => quote! { i64 },
             Ty::F64 => quote! { f64 },
+            Ty::U32 => quote! { u32 },
+            Ty::I32 => quote! { i32 },
             Ty::Bool => quote! { bool },
             Ty::String => quote! { String },
             Ty::Unit => quote! { () },
@@ -302,11 +317,18 @@ impl ToTokens for Ty {
             Ty::TokenMint => quote! { token::Mint },
             Ty::AssociatedTokenAccount => quote! { token::TokenAccount },
             Ty::ExactDefined {
-                name, is_acc: true, ..
+                name,
+                is_zero_copy,
+                is_acc: true,
+                ..
             } => {
                 let name = ident(&name);
 
-                quote! { Account<'_, #name> }
+                if *is_zero_copy {
+                    quote! { AccountLoader<'_, #name> }
+                } else {
+                    quote! { Account<'_, #name> }
+                }
             }
             Ty::ExactDefined { name, .. } => {
                 let name = ident(&name);
@@ -480,6 +502,47 @@ impl ToTokens for Statement {
                     let mut #name = &mut ctx.accounts.#name;
                 }
             }
+            Statement::DeclareAccountData { name, ty } => {
+                let data_name = ident(&data_name(&name));
+                let name = ident(&name);
+
+                match ty {
+                    Ty::UncheckedAccount => quote! {
+                        let mut #data_name = #name.try_borrow_mut_data()?;
+                    },
+                    Ty::ExactDefined {
+                        is_acc: true,
+                        is_zero_copy: true,
+                        is_mut: true,
+                        ..
+                    } => quote! {
+                      let mut #data_name = ctx.accounts.#name.load_mut()?;
+                    },
+                    Ty::ExactDefined {
+                        is_acc: true,
+                        is_zero_copy: true,
+                        is_mut: false,
+                        ..
+                    } => quote! {
+                      let mut #data_name = ctx.accounts.#name.load()?;
+                    },
+                    Ty::Empty(init_ty)
+                        if matches!(
+                            **init_ty,
+                            Ty::ExactDefined {
+                                is_acc: true,
+                                is_zero_copy: true,
+                                ..
+                            }
+                        ) =>
+                    {
+                        quote! {
+                          let mut #data_name = ctx.accounts.#name.load_init()?;
+                        }
+                    }
+                    _ => quote! {},
+                }
+            }
             Statement::Require { cond, throw } => {
                 let cond = Grouped(&cond);
                 let throw = ident(&throw);
@@ -543,7 +606,7 @@ impl ToTokens for Expression {
                 let index = Grouped(&index);
 
                 quote! {
-                    #value[#index as usize]
+                    #value[(#index) as usize]
                 }
             }
             Expression::UnOp { op, value } => quote! {
@@ -737,6 +800,13 @@ impl ToTokens for Expression {
             Expression::GetBump { name } => quote! {
                 *ctx.bumps.get(#name).unwrap()
             },
+            Expression::GetData { name } => {
+                let data_name = ident(&data_name(name));
+
+                quote! {
+                  #data_name
+                }
+            }
             Expression::FString { format, args } => quote! {
                 format!(#format, #(#args),*)
             },

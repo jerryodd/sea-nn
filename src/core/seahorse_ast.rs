@@ -39,7 +39,7 @@ pub struct AccountsContext {
 }
 
 /// A defined type.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TyDef {
     Struct {
         name: String,
@@ -159,6 +159,10 @@ pub enum Statement {
         name: String,
         ty: Ty,
     },
+    DeclareAccountData {
+        name: String,
+        ty: Ty,
+    },
     Require {
         cond: Expression,
         throw: String,
@@ -186,6 +190,8 @@ pub enum Ty {
     // Prelude (builtin) types
     U8,
     _U32, // Not supported but needed for generation
+    U32,
+    I32,
     U64,
     I64,
     F64,
@@ -220,6 +226,7 @@ pub enum Ty {
         name: String,
         is_mut: bool,
         is_acc: bool,
+        is_zero_copy: bool,
     },
     DefinedName(String),
     Never,
@@ -238,6 +245,7 @@ pub enum TraitName {
     Enum,
     Account,
     Instruction,
+    ZeroCopy,
 }
 
 /// An expression.
@@ -307,6 +315,9 @@ pub enum Expression {
         signer: Option<Vec<Expression>>,
     },
     GetBump {
+        name: String,
+    },
+    GetData {
         name: String,
     },
     FString {
@@ -450,19 +461,26 @@ impl Ty {
                 | Self::AssociatedTokenAccount,
                 "key",
             ) => Self::function0(Self::Pubkey),
-            (Self::U8 | Self::U64 | Self::I64 | Self::F64, "abs") => Self::Function {
-                params: vec![],
-                returns: Box::new(self.clone()),
-            },
+            (Self::U8 | Self::U64 | Self::I64 | Self::F64 | Self::U32 | Self::I32, "abs") => {
+                Self::Function {
+                    params: vec![],
+                    returns: Box::new(self.clone()),
+                }
+            }
             (Self::F64, "floor" | "round" | "ceil") => Self::function0(Self::F64),
-            (Self::U8 | Self::U64 | Self::I64 | Self::F64, "min" | "max") => Self::Function {
+            (
+                Self::U8 | Self::U64 | Self::I64 | Self::F64 | Self::U32 | Self::I32,
+                "min" | "max",
+            ) => Self::Function {
                 params: vec![Param::new("0", self.clone())],
                 returns: Box::new(self.clone()),
             },
-            (Self::U8 | Self::U64 | Self::I64 | Self::F64, "pow") => Self::Function {
-                params: vec![Param::new("0", Ty::_U32)],
-                returns: Box::new(self.clone()),
-            },
+            (Self::U8 | Self::U64 | Self::I64 | Self::F64 | Self::U32 | Self::I32, "pow") => {
+                Self::Function {
+                    params: vec![Param::new("0", Ty::_U32)],
+                    returns: Box::new(self.clone()),
+                }
+            }
             (Self::F64, "powf") => Self::Function {
                 params: vec![Param::new("0", Ty::F64)],
                 returns: Box::new(self.clone()),
@@ -483,14 +501,24 @@ impl Ty {
             Self::F64 => Some(0),
             Self::I64 => Some(1),
             Self::U64 => Some(2),
-            Self::U8 => Some(3),
+            Self::I32 => Some(3),
+            Self::U32 => Some(4),
+            Self::U8 => Some(5),
             _ => None,
         }
     }
 
     /// Numeric type
     pub fn num() -> Self {
-        Self::Union(vec![Self::U8, Self::U64, Self::I64, Self::F64])
+        Self::Union(vec![
+            Self::U8,
+            Self::U64,
+            Self::I64,
+            Self::F64,
+            Self::U32,
+            Self::I32,
+            Self::Any,
+        ])
     }
 
     /// Check whether this type fits as another. Basically only necessary because of Union types
@@ -516,6 +544,8 @@ impl Ty {
             | Self::U64
             | Self::I64
             | Self::F64
+            | Self::U32
+            | Self::I32
             | Self::Bool
             | Self::String
             | Self::Pubkey => true,
@@ -570,7 +600,7 @@ impl TraitName {
                 "key" => Some(Ty::function0(Ty::Pubkey)),
                 _ => None,
             },
-            Self::Enum | Self::Instruction => None,
+            Self::Enum | Self::Instruction | Self::ZeroCopy => None,
         }
     }
 
@@ -611,9 +641,9 @@ impl Expression {
         }
     }
 
-    pub fn as_id(self) -> Option<String> {
+    pub fn as_id(&self) -> Option<String> {
         match self {
-            Expression::Id(name) => Some(name),
+            Expression::Id(name) => Some(name.to_string()),
             _ => None,
         }
     }
@@ -658,6 +688,20 @@ impl TyDef {
         }
     }
 
+    pub fn is_zero_copy(&self) -> bool {
+        match self {
+            TyDef::Struct { traits, .. } => traits.contains(&TraitName::ZeroCopy),
+            _ => false,
+        }
+    }
+
+    pub fn get_name(&self) -> &String {
+        match self {
+            TyDef::Struct { name, .. } => name,
+            TyDef::Enum { name, .. } => name,
+        }
+    }
+
     /// Get the type of an attribute of this defined type.
     pub fn get_attr(&self, attr: &str) -> Option<Ty> {
         match self {
@@ -697,6 +741,7 @@ impl TyDef {
                     if option.as_str() == attr {
                         return Some(Ty::ExactDefined {
                             name: name.clone(),
+                            is_zero_copy: false,
                             is_mut: false,
                             is_acc: false,
                         });
@@ -800,10 +845,19 @@ impl Operator {
             | Self::Lte
             | Self::Gte
             | Self::Eq
+            | Self::LShift
+            | Self::RShift
+            | Self::BitAnd
             | Self::NotEq => {
                 // See if we can skip numeric coercion
-                if (*self == Self::Eq || *self == Self::NotEq) && left == right {
+                if (*self == Self::Eq || *self == Self::NotEq) && (left == right) {
                     return Some((left.clone(), right.clone()));
+                }
+
+                if left == &Ty::Any {
+                    return Some((right.clone(), right.clone()));
+                } else if right == &Ty::Any {
+                    return Some((left.clone(), left.clone()));
                 }
 
                 let left_strictness = left.numeric_strictness();

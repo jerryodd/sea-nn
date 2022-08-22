@@ -503,6 +503,8 @@ impl TryFrom<Expression> for Ty {
                 "u64" => Ty::U64,
                 "i64" => Ty::I64,
                 "f64" => Ty::F64,
+                "u32" => Ty::U32,
+                "i32" => Ty::I32,
                 "bool" => Ty::Bool,
                 "String" => Ty::String,
                 "Pubkey" => Ty::Pubkey,
@@ -547,6 +549,7 @@ impl TryFrom<py::Expression> for TraitName {
                 "Account" => Ok(TraitName::Account),
                 // Decorators
                 "instruction" => Ok(TraitName::Instruction), // TODO separate from trait types
+                "zero_copy" => Ok(TraitName::ZeroCopy),
                 name => Err(UnsupportedError::TraitNotRecognized(name.to_string())),
             },
             _ => Err(UnsupportedError::TraitNotIdentifier),
@@ -847,12 +850,14 @@ impl TryFrom<py::Statement> for Def {
             } => {
                 if keywords.len() > 0 {
                     Err(UnsupportedError::ClassDefWithKeywords)
-                } else if decorator_list.len() > 0 {
-                    Err(UnsupportedError::ClassDefWithDecorators)
                 } else {
-                    let bases = vec_try_into(bases)?;
-                    let is_enum = bases.contains(&TraitName::Enum);
-                    let is_account = bases.contains(&TraitName::Account);
+                    let traits = [
+                        vec_try_into(bases)?.as_slice(),
+                        vec_try_into(decorator_list)?.as_slice(),
+                    ]
+                    .concat();
+                    let is_enum = traits.contains(&TraitName::Enum);
+                    let is_account = traits.contains(&TraitName::Account);
 
                     let body = vec_try_into(body)?;
 
@@ -897,7 +902,7 @@ impl TryFrom<py::Statement> for Def {
                         let type_def = TyDef::Struct {
                             name,
                             fields,
-                            traits: bases,
+                            traits,
                         };
                         Ok(Def::TyDef(type_def))
                     }

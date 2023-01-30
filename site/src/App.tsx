@@ -80,7 +80,11 @@ const submit = async (grid: number[][], setLogs: any) => {
     ];
   } catch (e: any) {
     console.log(e);
-    alert("Error: " + (e?.message ?? e));
+    alert(
+      "Error: " +
+        (e?.message ?? e) +
+        "\n\n⚠️ Please ensure your wallet is set to Devnet under Developer Settings!"
+    );
   }
 };
 

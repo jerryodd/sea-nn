@@ -520,8 +520,8 @@ impl TryFrom<Expression> for Ty {
                 Expression::Id(name) => match name.as_str() {
                     "Empty" => Ok(Ty::Empty(box_try_into(index)?)),
                     // TODO disabling lists for now
-                    // "List" => Ok(Ty::List(box_try_into(index)?)),
-                    "List" => Err(UnsupportedError::ListType),
+                    "List" => Ok(Ty::List(box_try_into(index)?)),
+                    //"List" => Err(UnsupportedError::ListType),
                     "Array" => match index.as_tuple2() {
                         Some((expr, Expression::Int(len))) => Ok(Self::Array(
                             Box::new(expr.try_into()?),

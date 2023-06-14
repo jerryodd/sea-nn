@@ -14,7 +14,7 @@ import { BiEraser, BiLink, BiSend, BiShuffle } from "react-icons/bi";
 import { ABOUT, INTRO } from "./text";
 
 const PROGRAM_ID = new PublicKey(
-  "FWLq3NyoFVUWznniq1i5vU8Dp1DK3P6JxrXnJp2mq1DX"
+  "EUpVs4QcQwmLGSWbHieb5HxuBegxYCyYd6CyyVix9g6M"
 );
 const MODEL_ID = new PublicKey("J71bKpwMYAQ6SMNK8f84BsbgFWhwhABs9jPhWCYeE2JJ"); // devnet
 const L = 28;

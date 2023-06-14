@@ -4,14 +4,13 @@ use anchor_spl::associated_token;
 use anchor_spl::token;
 use std::convert::TryFrom;
 
-declare_id!("FWLq3NyoFVUWznniq1i5vU8Dp1DK3P6JxrXnJp2mq1DX");
+declare_id!("EUpVs4QcQwmLGSWbHieb5HxuBegxYCyYd6CyyVix9g6M");
 
 #[derive(Debug)]
-#[account(zero_copy)]
+#[account]
 pub struct Model {
     authority: Pubkey,
-    conv: [[i32; 8]; 512],
-    dense: [[[[i32; 10]; 8]; 28]; 28],
+    datas: u64,
 }
 
 pub fn init_model_handler(mut ctx: Context<InitModel>) -> Result<()> {
@@ -33,128 +32,40 @@ pub fn init_model_handler(mut ctx: Context<InitModel>) -> Result<()> {
     Ok(())
 }
 
-pub fn set_weights_handler(
-    mut ctx: Context<SetWeights>,
-    mut data: [i32; 128],
-    mut loc: [u32; 9],
-) -> Result<()> {
+pub fn init_acc_handler(mut ctx: Context<InitAcc>, mut data: [u8; 1024]) -> Result<()> {
     let mut signer = &mut ctx.accounts.signer;
     let mut model = &mut ctx.accounts.model;
-    let mut __model_data = ctx.accounts.model.load_mut()?;
+    let mut __model_data = model.try_borrow_mut_data()?;
+    let mut discriminator = [152, 221, 247, 122, 185, 125, 223, 151];
 
-    require!(
-        (__model_data.authority as Pubkey) == signer.key(),
-        ProgramError::E000
-    );
+    for i in 0..8 {
+        __model_data[(i) as usize] = discriminator[(i) as usize];
+    }
 
-    let mut c = 0;
+    let mut authority = signer.key().to_bytes();
 
-    if loc[(0) as usize] == (0 as u32) {
-        for i in loc[(1) as usize]..loc[(2) as usize] {
-            for j in loc[(3) as usize]..loc[(4) as usize] {
-                __model_data.conv[(i) as usize][(j) as usize] = data[(c) as usize];
+    for i in 0..32 {
+        __model_data[(8 + i) as usize] = authority[(i) as usize];
+    }
 
-                c += 1;
-            }
-        }
-    } else {
-        if loc[(0) as usize] == (1 as u32) {
-            for i in loc[(1) as usize]..loc[(2) as usize] {
-                for j in loc[(3) as usize]..loc[(4) as usize] {
-                    for k in loc[(5) as usize]..loc[(6) as usize] {
-                        for l in loc[(7) as usize]..loc[(8) as usize] {
-                            __model_data.dense[(i) as usize][(j) as usize][(k) as usize]
-                                [(l) as usize] = data[(c) as usize];
-
-                            c += 1;
-                        }
-                    }
-                }
-            }
-        }
+    for i in 0..1024 {
+        __model_data[(((8 + 32) as u64) + i) as usize] = data[(i) as usize];
     }
 
     Ok(())
 }
 
-pub fn predict_handler(mut ctx: Context<Predict>, mut image: [u32; 28]) -> Result<()> {
+pub fn set_weights_handler(mut ctx: Context<SetWeights>) -> Result<()> {
+    let mut signer = &mut ctx.accounts.signer;
     let mut model = &mut ctx.accounts.model;
-    let mut __model_data = ctx.accounts.model.load_mut()?;
+    let mut data = &mut ctx.accounts.data;
+    let mut __data_data = data.try_borrow_mut_data()?;
 
-    msg!("{}", "==== INPUT ====");
+    require!(model.authority == signer.key(), ProgramError::E000);
 
-    for i in 0..28 {
-        let mut s: [u8; 28] = <[u8; 28] as TryFrom<_>>::try_from({
-            let mut list = Vec::new();
-
-            for j in 0..28 {
-                list.push((((image[(i) as usize] & ((1 << j) as u32)) > (0 as u32)) as u8));
-            }
-
-            list
-        })
-        .unwrap();
-
-        msg!("{:?}", s);
+    for i in __data_data.into_iter() {
+        model.datas = model.datas + (*i as u64);
     }
-
-    let mut out: [i32; 10] = <[i32; 10] as TryFrom<_>>::try_from({
-        let mut list = Vec::new();
-
-        for i in 0..10 {
-            list.push((0 as i32));
-        }
-
-        list
-    })
-    .unwrap();
-
-    for i in 0..13 {
-        for j in 0..13 {
-            for f in 0..8 {
-                let mut m = (-33000) as i32;
-
-                for di in 0..2 {
-                    for dj in 0..2 {
-                        let mut t: i32 = <i32 as TryFrom<_>>::try_from((i * 2) + di).unwrap();
-                        let mut l: i32 = <i32 as TryFrom<_>>::try_from((j * 2) + dj).unwrap();
-                        let mut b1 = ((image[(t) as usize] as i32) & ((7 as i32) << l)) >> l;
-                        let mut b2 =
-                            ((image[(t + (1 as i32)) as usize] as i32) & ((7 as i32) << l)) >> l;
-
-                        let mut b3 =
-                            ((image[(t + (2 as i32)) as usize] as i32) & ((7 as i32) << l)) >> l;
-
-                        m = m.max(
-                            __model_data.conv
-                                [((b1 + (b2 << (3 as i32))) + (b3 << (6 as i32))) as usize]
-                                [(f) as usize] as i32,
-                        );
-                    }
-                }
-
-                for d in 0..10 {
-                    out[(d) as usize] = out[(d) as usize]
-                        + ((m
-                            * (__model_data.dense[(i) as usize][(j) as usize][(f) as usize]
-                                [(d) as usize] as i32))
-                            >> (15 as i32));
-                }
-            }
-        }
-    }
-
-    let mut p = 0;
-
-    for i in 0..10 {
-        if out[(i) as usize] > out[(p) as usize] {
-            p = i;
-        }
-    }
-
-    msg!("{}", "==== OUTPUT ====");
-
-    msg!("{} {}", "prediction:", p);
 
     Ok(())
 }
@@ -169,17 +80,23 @@ pub struct InitModel<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitAcc<'info> {
+    #[account(mut)]
+    pub signer: Signer<'info>,
+    #[doc = "CHECK: This account is unchecked."]
+    #[account(mut)]
+    pub model: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct SetWeights<'info> {
     #[account(mut)]
     pub signer: Signer<'info>,
     #[account(mut)]
-    pub model: AccountLoader<'info, Model>,
-}
-
-#[derive(Accounts)]
-pub struct Predict<'info> {
+    pub model: Box<Account<'info, Model>>,
+    #[doc = "CHECK: This account is unchecked."]
     #[account(mut)]
-    pub model: AccountLoader<'info, Model>,
+    pub data: UncheckedAccount<'info>,
 }
 
 #[program]
@@ -190,12 +107,12 @@ pub mod sea_nn {
         init_model_handler(ctx)
     }
 
-    pub fn set_weights(ctx: Context<SetWeights>, data: [i32; 128], loc: [u32; 9]) -> Result<()> {
-        set_weights_handler(ctx, data, loc)
+    pub fn init_acc(ctx: Context<InitAcc>, data: [u8; 1024]) -> Result<()> {
+        init_acc_handler(ctx, data)
     }
 
-    pub fn predict(ctx: Context<Predict>, image: [u32; 28]) -> Result<()> {
-        predict_handler(ctx, image)
+    pub fn set_weights(ctx: Context<SetWeights>) -> Result<()> {
+        set_weights_handler(ctx)
     }
 }
 

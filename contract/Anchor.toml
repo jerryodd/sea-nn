@@ -2,14 +2,14 @@
 seeds = false
 skip-lint = false
 [programs.localnet]
-sea_nn = "FWLq3NyoFVUWznniq1i5vU8Dp1DK3P6JxrXnJp2mq1DX"
+sea_nn = "EUpVs4QcQwmLGSWbHieb5HxuBegxYCyYd6CyyVix9g6M"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
-wallet = "/Users/wireless_anon/.config/solana/id.json"
+wallet = "/home/codespace/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

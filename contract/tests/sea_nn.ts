@@ -11,7 +11,7 @@ describe("sea_nn", () => {
   const provider = anchor.AnchorProvider.local("https://api.devnet.solana.com");
   const program = new anchor.Program(
     IDL,
-    "FWLq3NyoFVUWznniq1i5vU8Dp1DK3P6JxrXnJp2mq1DX",
+    "EUpVs4QcQwmLGSWbHieb5HxuBegxYCyYd6CyyVix9g6M",
     provider
   );
   const connection = new anchor.web3.Connection(
@@ -75,20 +75,16 @@ describe("sea_nn", () => {
   };
 
   it("Is initialized!", async () => {
-    const rawFilters = readJson("./conv_60k_u16.json").filters; // [8][3][3]
-    const filters = precompFilter(rawFilters); // [8][512] -> [512][8]
-    const weights = readJson("./dense_60k_u16.json").weights; // [13 * 13 * 8][10] -> [13][13][8][10]
-
+    const contents = fs.readFileSync('/workspaces/sea-nn/animage.jpg', {encoding: 'binary'});
+    let length = contents.length 
+    let width = length / Math.sqrt(length)
+    let height = width 
     // const model = new web3.Keypair();
-    const model = {
-      publicKey: new web3.PublicKey(
-        "J71bKpwMYAQ6SMNK8f84BsbgFWhwhABs9jPhWCYeE2JJ"
-      ),
-    };
+    const model = web3.Keypair.generate()
     console.log("model pk", model.publicKey.toBase58()); //
     if ((model as any).privateKey) {
       // discriminator + authority + filters + weights
-      const space = 8 + 32 + 4 * (512 * 8) + 4 * (28 * 28 * 10 * 8);
+      const space = 8 + 32 + 4 * (length) + 4 * (28 * 28 * 10 * 8);
       await sendIx(
         await web3.SystemProgram.createAccount({
           fromPubkey: publicKey,
@@ -109,20 +105,43 @@ describe("sea_nn", () => {
         false
       );
     }
-    const blockSize = 16;
+    const blockSize = Math.ceil(length / 1100);
     let block: number[] = [];
     let numBlocks = 0;
+
     const results: Promise<any>[] = [];
-    for (let i = 0; i < 512; i++) {
-      for (let j = 0; j < 8; j++) {
-        block.push(filters[j][i]);
-      }
-      if ((i + 1) % blockSize === 0) {
-        console.log("sending block", numBlocks++);
+    for (var i = 0 ; i <= blockSize; i++){
+    for (var segment of contents.slice(1100 * i, (i+1)*1100)){
+        
+        const acc = web3.Keypair.generate();
+
+        console.log("model pk", model.publicKey.toBase58()); //
+        if ((model as any).privateKey) {
+          // discriminator + authority + filters + weights
+          const space = segment.length + 64;
+          await sendIx(
+            await web3.SystemProgram.createAccount({
+              fromPubkey: publicKey,
+              newAccountPubkey: acc.publicKey,
+              programId: program.programId,
+              space,
+              lamports: await connection.getMinimumBalanceForRentExemption(space),
+            }),
+            [acc.publicKey as any],
+            false
+          );
+          await sendIx(
+            await program.methods
+              .initAcc([parseInt(segment)])
+              .accounts({ model: model.publicKey })
+              .instruction(),
+            [],
+            false
+          );
         const res = await sendIx(
           await program.methods
-            .setWeights(block, [0, i + 1 - blockSize, i + 1, 0, 8, 0, 0, 0, 0])
-            .accounts({ model: model.publicKey })
+            .setWeights()
+            .accounts({ model: model.publicKey, data: acc.publicKey })
             .instruction(),
           [],
           false
@@ -131,28 +150,8 @@ describe("sea_nn", () => {
         block = [];
       }
     }
-    let c = 0;
-    for (let i = 0; i < 13; i++) {
-      for (let j = 0; j < 13; j++) {
-        block = [];
-        for (let k = 0; k < 8; k++) {
-          for (let l = 0; l < 10; l++) {
-            block.push(weights[c][l]);
-          }
-          c++;
-        }
-        console.log("sending block", numBlocks++);
-        const res = await sendIx(
-          await program.methods
-            .setWeights(block, [1, i, i + 1, j, j + 1, 0, 8, 0, 10])
-            .accounts({ model: model.publicKey })
-            .instruction(),
-          [],
-          false
-        );
-        // results.push(res);
-      }
-    }
+  }
+  
     // console.log("sending blocks...");
     // await Promise.all(results);
     const image = [
@@ -215,11 +214,5 @@ describe("sea_nn", () => {
       0b0000000000000000000000000000,
       0b0000000000000000000000000000,
     ];
-    await sendIx(
-      await program.methods
-        .predict(image)
-        .accounts({ model: model.publicKey })
-        .instruction()
-    );
   });
 });
